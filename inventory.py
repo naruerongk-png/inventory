@@ -1,4 +1,3 @@
-# inventory.py
 import streamlit as st
 import extra_streamlit_components as stx
 import time
@@ -32,10 +31,11 @@ def login_page():
         if os.path.exists("LOGO ARI.png"):
             st.image("LOGO ARI.png", width=250)
         else:
-            st.warning("Logo not found")
+            st.warning("Logo not found (LOGO ARI.png)")
 
     st.markdown("<h1 style='text-align: center;'>🔐 เข้าสู่ระบบ (IT Asset System)</h1>", unsafe_allow_html=True)
     
+    # Check Cookie
     cookie_user = cookie_manager.get(cookie="asset_auth_token")
     
     if cookie_user and user_exists(cookie_user):

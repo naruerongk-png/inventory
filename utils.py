@@ -1,4 +1,3 @@
-# utils.py
 import sqlite3
 import pandas as pd
 import hashlib
@@ -11,7 +10,8 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from fpdf import FPDF
 from PIL import Image
-from glpi_client import GlpiApi
+# ต้องมีไฟล์ glpi_client.py อยู่ในโฟลเดอร์เดียวกัน
+from glpi_client import GlpiApi 
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
