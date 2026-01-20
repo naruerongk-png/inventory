@@ -26,10 +26,19 @@ def init_and_migrate_db():
     cursor = conn.cursor()
     
     # --- Create Assets Table ---
+    # เพิ่ม glpi_id เพื่อการเชื่อมต่อที่แม่นยำขึ้น
     cursor.execute('''CREATE TABLE IF NOT EXISTS assets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, asset_tag TEXT UNIQUE, category TEXT, model TEXT, 
-        serial_number TEXT, status TEXT, assigned_to TEXT, purchase_date TEXT, 
-        price REAL DEFAULT 0, last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        asset_tag TEXT UNIQUE, 
+        glpi_id INTEGER UNIQUE,
+        category TEXT, 
+        model TEXT, 
+        serial_number TEXT, 
+        status TEXT, 
+        assigned_to TEXT, 
+        purchase_date TEXT, 
+        price REAL DEFAULT 0, 
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
     # --- Create Users Table ---
@@ -73,10 +82,12 @@ def init_and_migrate_db():
     )''')
     
     # --- Create Recycle Bin Table ---
+    # เพิ่ม glpi_id ในถังขยะด้วย
     cursor.execute('''CREATE TABLE IF NOT EXISTS recycle_bin (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asset_tag TEXT,
-        category TEXT,
+        glpi_id INTEGER,
+        category TEXT, 
         model TEXT,
         serial_number TEXT,
         status TEXT,
@@ -98,7 +109,7 @@ def init_and_migrate_db():
             hashed_password = hash_password(password)
             cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
     
-    # --- Schema Migrations ---
+    # --- Schema Migrations (เพิ่ม Column ใหม่ๆ อัตโนมัติถ้ารันเวอร์ชั่นเก่า) ---
     try: cursor.execute("ALTER TABLE assets ADD COLUMN warranty_date TEXT")
     except: pass
     try: cursor.execute("ALTER TABLE assets ADD COLUMN vendor TEXT")
@@ -118,6 +129,12 @@ def init_and_migrate_db():
     try: cursor.execute("ALTER TABLE assets ADD COLUMN comment TEXT")
     except: pass
     
+    # --- Migration: GLPI ID Support ---
+    try: cursor.execute("ALTER TABLE assets ADD COLUMN glpi_id INTEGER")
+    except: pass
+    try: cursor.execute("ALTER TABLE recycle_bin ADD COLUMN glpi_id INTEGER")
+    except: pass
+
     conn.commit()
     conn.close()
 
@@ -509,8 +526,8 @@ def create_bulk_qr_pdf(data_list):
         
     return pdf.output(dest='S').encode('latin-1')
 
-# --- CORE LOGIC ---
-def add_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, img_blob, specs):
+# --- CORE LOGIC (Updated for GLPI ID) ---
+def add_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, img_blob, specs, glpi_id=None):
     tag_valid, tag_msg = validate_asset_tag(tag)
     if not tag_valid: return False, tag_msg
     if not model or not model.strip(): return False, "Model cannot be empty"
@@ -531,21 +548,22 @@ def add_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty
                     return False, "Image file is too large (max 5MB)"
             except: img_data = None
         
+        # Insert with GLPI ID if provided
         sql = '''INSERT INTO assets (asset_tag, category, model, serial_number, status, assigned_to, 
-                 purchase_date, price, warranty_date, vendor, last_audit_date, department, image_blob, specs) 
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'''
+                 purchase_date, price, warranty_date, vendor, last_audit_date, department, image_blob, specs, glpi_id) 
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'''
         conn.execute(sql, (tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, 
-                           str(datetime.now().date()), dept, img_data, specs))
+                           str(datetime.now().date()), dept, img_data, specs, glpi_id))
         conn.commit()
-        log_action(tag, "CREATE", f"เพิ่ม: {model}")
+        log_action(tag, "CREATE", f"เพิ่ม: {model} (GLPI ID: {glpi_id})")
         return True, "Success"
     except sqlite3.IntegrityError:
-        return False, "Asset Tag already exists"
+        return False, "Asset Tag or GLPI ID already exists"
     except Exception as e:
         return False, f"Database error: {str(e)}"
     finally: conn.close()
 
-def update_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs):
+def update_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, glpi_id=None):
     if not model or not model.strip(): return False, "Model cannot be empty"
     if not validate_price(price)[0]: return False, "Invalid Price"
     
@@ -555,10 +573,12 @@ def update_asset(tag, cat, model, serial, status, assigned, p_date, price, warra
         cursor.execute("SELECT 1 FROM assets WHERE asset_tag=?", (tag,))
         if not cursor.fetchone(): return False, "Asset not found"
         
-        conn.execute('''UPDATE assets SET category=?, model=?, serial_number=?, status=?, assigned_to=?, 
-                        purchase_date=?, price=?, warranty_date=?, vendor=?, department=?, specs=?, last_updated=CURRENT_TIMESTAMP 
-                        WHERE asset_tag=?''', 
-                     (cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, tag))
+        # Update including GLPI ID
+        sql = '''UPDATE assets SET category=?, model=?, serial_number=?, status=?, assigned_to=?, 
+                 purchase_date=?, price=?, warranty_date=?, vendor=?, department=?, specs=?, last_updated=CURRENT_TIMESTAMP, glpi_id=?
+                 WHERE asset_tag=?'''
+        conn.execute(sql, (cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, glpi_id, tag))
+        
         conn.commit()
         log_action(tag, "UPDATE", f"Status: {status}")
         return True, "Success"
@@ -670,8 +690,9 @@ def soft_delete(tag):
     if row:
         c.execute("DELETE FROM recycle_bin WHERE asset_tag=?", (tag,))
         try:
-             c.execute("INSERT INTO recycle_bin (asset_tag,category,model,serial_number,status,assigned_to,purchase_date,price) VALUES (?,?,?,?,?,?,?,?)", 
-                        (row[1],row[2],row[3],row[4],row[5],row[6],row[7],row[8]))
+             # Backup with GLPI ID if available
+             c.execute("INSERT INTO recycle_bin (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, purchase_date, price) VALUES (?,?,?,?,?,?,?,?,?)", 
+                        (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
         except: pass
         c.execute("DELETE FROM assets WHERE asset_tag=?", (tag,))
         conn.commit(); log_action(tag, "DELETE", "Moved to Bin")
@@ -682,26 +703,35 @@ def restore_asset(tag):
     row = c.execute("SELECT * FROM recycle_bin WHERE asset_tag=?", (tag,)).fetchone()
     if row:
         try:
-            c.execute("INSERT INTO assets (asset_tag,category,model,serial_number,status,assigned_to,purchase_date,price) VALUES (?,?,?,?,?,?,?,?)", 
-                            (row[1],row[2],row[3],row[4],row[5],row[6],row[7],row[8]))
+            # Restore with GLPI ID
+            c.execute("INSERT INTO assets (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, purchase_date, price) VALUES (?,?,?,?,?,?,?,?,?)", 
+                            (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
             c.execute("DELETE FROM recycle_bin WHERE asset_tag=?", (tag,))
             conn.commit(); return True, "Success"
         except: return False, "Duplicate"
     conn.close(); return False, "Not Found"
 
 def sync_glpi_data(glpi_computers_df):
+    """
+    Sync logic updated to use GLPI ID as the primary key for matching if available.
+    Fallback to Asset Tag (Inventory Number) if GLPI ID is not in DB yet.
+    """
     if glpi_computers_df.empty: return 0, 0, 0
     success_inserts = 0; success_updates = 0; errors = 0
     
+    conn = get_connection()
+    cursor = conn.cursor()
+
     for _, row in glpi_computers_df.iterrows():
-        asset_tag = row.get('otherserial')
-        if not asset_tag or asset_tag == 'None':
-            asset_tag = row.get('name')
+        try:
+            glpi_id = int(row.get('id'))
+        except:
+            continue # Skip if no GLPI ID
+            
+        asset_tag = str(row.get('otherserial') or row.get('name'))
         if not asset_tag or asset_tag == 'None': continue
         
-        asset_tag = str(asset_tag)
-        existing_asset = get_asset_by_tag(asset_tag)
-        
+        # Mapping Data
         model = str(row.get('computermodels_id', ''))
         serial = str(row.get('serial', ''))
         category = str(row.get('computertypes_id', 'Other'))
@@ -709,28 +739,54 @@ def sync_glpi_data(glpi_computers_df):
         assigned_to = str(row.get('users_id', ''))
         vendor = str(row.get('manufacturers_id', ''))
         
-        price = existing_asset['price'] if existing_asset is not None and pd.notnull(existing_asset['price']) else 0.0
-        warranty = existing_asset['warranty_date'] if existing_asset is not None else None
-        dept = existing_asset['department'] if existing_asset is not None else "Common"
-        specs = existing_asset['specs'] if existing_asset is not None else ""
-        
         p_date = row.get('date_mod', row.get('date_creation'))
         if p_date and isinstance(p_date, str): p_date = p_date.split(" ")[0]
         else: p_date = None
 
-        try:
-            if existing_asset is not None:
-                success, _ = update_asset(asset_tag, category, model, serial, status, assigned_to, 
-                    p_date if p_date else existing_asset['purchase_date'], price, warranty, vendor, dept, specs)
-                if success: success_updates += 1
-                else: errors += 1
-            else:
-                success, _ = add_asset(asset_tag, category, model, serial, status, assigned_to,
-                    p_date, 0.0, None, vendor, "Common", None, "")
-                if success: success_inserts += 1
-                else: errors += 1
-        except Exception: errors += 1
+        # Check by GLPI ID first (Best match)
+        cursor.execute("SELECT * FROM assets WHERE glpi_id=?", (glpi_id,))
+        existing_by_id = cursor.fetchone()
 
+        # Check by Asset Tag (Legacy match)
+        cursor.execute("SELECT * FROM assets WHERE asset_tag=?", (asset_tag,))
+        existing_by_tag = cursor.fetchone()
+
+        if existing_by_id:
+            # Found by GLPI ID -> Update everything
+            # Preserve existing local data if needed (price, etc.)
+            price = existing_by_id[9] # Index 9 is price
+            try:
+                cursor.execute('''UPDATE assets SET asset_tag=?, category=?, model=?, serial_number=?, status=?, assigned_to=?, 
+                                purchase_date=?, vendor=?, last_updated=CURRENT_TIMESTAMP 
+                                WHERE glpi_id=?''', 
+                            (asset_tag, category, model, serial, status, assigned_to, p_date or existing_by_id[8], vendor, glpi_id))
+                success_updates += 1
+            except Exception as e:
+                errors += 1
+
+        elif existing_by_tag:
+            # Found by Tag but no GLPI ID yet -> Link GLPI ID and Update
+            try:
+                cursor.execute('''UPDATE assets SET glpi_id=?, category=?, model=?, serial_number=?, status=?, assigned_to=?, 
+                                purchase_date=?, vendor=?, last_updated=CURRENT_TIMESTAMP 
+                                WHERE asset_tag=?''', 
+                            (glpi_id, category, model, serial, status, assigned_to, p_date or existing_by_tag[8], vendor, asset_tag))
+                success_updates += 1
+            except Exception as e:
+                errors += 1
+        else:
+            # Not found -> Insert New
+            try:
+                cursor.execute('''INSERT INTO assets (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, 
+                                purchase_date, price, vendor, last_audit_date, department, specs) 
+                                VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)''', 
+                            (asset_tag, glpi_id, category, model, serial, status, assigned_to, p_date, vendor, str(datetime.now().date()), "Common", ""))
+                success_inserts += 1
+            except Exception as e:
+                errors += 1
+    
+    conn.commit()
+    conn.close()
     return success_inserts, success_updates, errors
 
 # Initialize DB on load

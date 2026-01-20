@@ -18,7 +18,7 @@ st.set_page_config(page_title="IT Asset Master V16", layout="wide", page_icon="�
 # Global Cookie Manager
 cookie_manager = stx.CookieManager()
 
-# Import Pages (Import after utils to avoid circular dependency)
+# Import Pages
 from pages import (
     show_dashboard, show_glpi_sync, show_borrow_return, show_maintenance,
     show_audit, show_search, show_manage, show_add_asset, show_qr_code,
@@ -66,13 +66,29 @@ def login_page():
                     st.error("ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
 
 def main_app():
+    # --- 1. LOGO & USER INFO ---
     if os.path.exists("LOGO ARI.png"):
         st.sidebar.image("LOGO ARI.png", width=250)
     st.sidebar.markdown("---")
 
     st.sidebar.title(f"👤 {st.session_state['username']}")
     st.sidebar.caption("IT Asset Master V16")
+    
+    # --- 2. MAIN MENU ---
+    st.sidebar.markdown("---")
+    
+    menu_list = [
+        "📈 Dashboard", "💻 GLPI Sync", "🔁 Borrow/Return", "🔧 Maintenance", 
+        "✅ Audit", "🔍 Search", "🛠️ Manage", "➕ Add", 
+        "🖨️ QR Code", "📋 Logs & Reprint", "🗑️ Bin"
+    ]
+    if st.session_state.get('username') == 'admin':
+        menu_list.append("👨‍💼 Admin")
 
+    page = st.sidebar.radio("Navigate", menu_list)
+
+    # --- 3. USER ACTIONS (PASSWORD & LOGOUT) ---
+    st.sidebar.markdown("---")
     with st.sidebar.expander("🔑 Change Password"):
         with st.form("change_password_form", clear_on_submit=True):
             current_password = st.text_input("Current Password", type="password")
@@ -104,6 +120,7 @@ def main_app():
         time.sleep(1) 
         st.rerun()
     
+    # --- 4. FILE MANAGEMENT ---
     st.sidebar.markdown("---")
     st.sidebar.header("File Management")
     
@@ -131,8 +148,13 @@ def main_app():
             df_i = pd.read_excel(up_file)
             count = 0
             for _, r in df_i.iterrows():
-                # Simplified import logic
-                add_asset(str(r['Asset Tag']), str(r['Category']), str(r['Model']), str(r['Serial']), str(r['Status']), str(r['Assigned To']), str(r['Date']).split(" ")[0], float(r.get('Price', 0.0)), None, None, "Common", None, str(r.get('Specs', '')))
+                # ตรวจสอบว่ามีคอลัมน์ GLPI ID หรือไม่ ถ้าไม่มีให้เป็น None
+                glpi_id = int(r['GLPI ID']) if 'GLPI ID' in r and pd.notnull(r['GLPI ID']) else None
+                
+                add_asset(str(r['Asset Tag']), str(r['Category']), str(r['Model']), str(r['Serial']), 
+                          str(r['Status']), str(r['Assigned To']), str(r['Date']).split(" ")[0], 
+                          float(r.get('Price', 0.0)), None, None, "Common", None, 
+                          str(r.get('Specs', '')), glpi_id=glpi_id)
                 count += 1
             st.sidebar.success(f"Imported {count} items.")
             time.sleep(1); st.rerun()
@@ -140,19 +162,8 @@ def main_app():
             st.sidebar.error(f"Error: {e}")
 
     df = load_data("assets")
-    st.sidebar.markdown("---")
-    st.sidebar.header("Main Menu")
 
-    menu_list = [
-        "📈 Dashboard", "💻 GLPI Sync", "🔁 Borrow/Return", "🔧 Maintenance", 
-        "✅ Audit", "🔍 Search", "🛠️ Manage", "➕ Add", 
-        "🖨️ QR Code", "📋 Logs & Reprint", "🗑️ Bin"
-    ]
-    if st.session_state.get('username') == 'admin':
-        menu_list.append("👨‍💼 Admin")
-
-    page = st.sidebar.radio("Navigate", menu_list)
-
+    # --- PAGE ROUTING ---
     if page == "📈 Dashboard": show_dashboard(df)
     elif page == "💻 GLPI Sync": show_glpi_sync()
     elif page == "🔁 Borrow/Return": show_borrow_return(df)

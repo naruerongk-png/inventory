@@ -73,13 +73,9 @@ def show_glpi_sync():
     if 'glpi_df' not in st.session_state: st.session_state.glpi_df = None
 
     st.markdown("### GLPI Sync Configuration")
-    
-    # --- แก้ไขจุดที่เกิด Error ---
-    # ใช้ try-except เพื่อดักจับกรณีไม่มีไฟล์ secrets.toml
     try:
         glpi_creds = st.secrets.get("glpi", {})
     except Exception:
-        # ถ้าหาไฟล์ไม่เจอ ให้ใช้ค่าว่างแทน โปรแกรมจะไม่ Crash
         glpi_creds = {}
 
     with st.form("glpi_form"):
@@ -271,7 +267,7 @@ def show_search(df):
         st.info("No assets to search.")
         return
 
-    search_query = st.text_input("Search by Tag, Model, Serial, or Assigned User", "")
+    search_query = st.text_input("Search by Tag, Model, Serial, Assigned User, or GLPI ID", "")
     col1, col2 = st.columns(2)
     with col1: status_filter = st.multiselect("Filter by Status", df['status'].unique(), default=df['status'].unique())
     with col2: category_filter = st.multiselect("Filter by Category", df['category'].unique(), default=df['category'].unique())
@@ -280,9 +276,12 @@ def show_search(df):
 
     if search_query:
         query = search_query.lower()
-        search_cols = ['asset_tag', 'model', 'serial_number', 'assigned_to']
+        search_cols = ['asset_tag', 'model', 'serial_number', 'assigned_to', 'glpi_id']
+        # Handle columns that might not exist in old schema
+        cols_to_search = [c for c in search_cols if c in filtered_df.columns]
+        
         filtered_df = filtered_df[
-            filtered_df[search_cols].fillna('').astype(str).apply(
+            filtered_df[cols_to_search].fillna('').astype(str).apply(
                 lambda x: x.str.lower().str.contains(query)
             ).any(axis=1)
         ]
@@ -303,13 +302,37 @@ def show_manage(df):
         asset_data = df[df['asset_tag'] == asset_tag].iloc[0].to_dict()
 
         with st.form("manage_asset_form"):
-            st.subheader(f"Editing: {asset_data['asset_tag']}")
+            st.subheader("Edit Asset Details")
+            
+            # --- 1. แยก Asset Tag และล็อคไม่ให้แก้ (Editable once rule) ---
+            st.text_input("Asset Tag (Fixed)", value=asset_data['asset_tag'], disabled=True, help="Cannot change Asset Tag after creation")
+            
+            # GLPI ID
+            glpi_id_val = int(asset_data.get('glpi_id')) if pd.notnull(asset_data.get('glpi_id')) else None
+            glpi_id = st.number_input("GLPI ID (Link)", value=glpi_id_val, placeholder="Auto-synced from GLPI")
+
             c1, c2 = st.columns(2)
             with c1:
                 model = st.text_input("Model", value=asset_data.get('model'))
-                category = st.selectbox("Category", ["Laptop", "Desktop", "Monitor", "Printer", "Network Gear", "Other"], index=["Laptop", "Desktop", "Monitor", "Printer", "Network Gear", "Other"].index(asset_data.get('category', 'Other')))
+                
+                # --- 2. แก้ไข Error: Notebook is not in list ---
+                current_category = asset_data.get('category', 'Other')
+                cat_options = ["Laptop", "Desktop", "Monitor", "Printer", "Network Gear", "Other"]
+                # ถ้า Category ปัจจุบันไม่มีใน List ให้เติมเข้าไปชั่วคราว
+                if current_category not in cat_options:
+                    cat_options.insert(0, current_category)
+                
+                category = st.selectbox("Category", cat_options, index=cat_options.index(current_category))
+                
                 serial_number = st.text_input("Serial Number", value=asset_data.get('serial_number'))
-                status = st.selectbox("Status", ["In Stock", "In Use", "Repair", "Retired"], index=["In Stock", "In Use", "Repair", "Retired"].index(asset_data.get('status', 'In Stock')))
+                
+                # Handle Status ที่ไม่มีใน List ด้วยเช่นกัน
+                current_status = asset_data.get('status', 'In Stock')
+                status_options = ["In Stock", "In Use", "Repair", "Retired"]
+                if current_status not in status_options:
+                    status_options.insert(0, current_status)
+                    
+                status = st.selectbox("Status", status_options, index=status_options.index(current_status))
 
             with c2:
                 try: p_date_val = datetime.strptime(str(asset_data.get('purchase_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('purchase_date') else None
@@ -331,8 +354,9 @@ def show_manage(df):
             if update_button:
                 p_date_str = str(purchase_date) if purchase_date else None
                 w_date_str = str(warranty_date) if warranty_date else None
+                # ใช้ asset_tag เดิมในการ Update (เพราะเราล็อคไม่ให้แก้แล้ว)
                 success, message = update_asset(asset_tag, category, model, serial_number, status, assigned_to,
-                    p_date_str, price, w_date_str, vendor, department, specs)
+                    p_date_str, price, w_date_str, vendor, department, specs, glpi_id=glpi_id)
                 if success:
                     st.success("Asset updated successfully!")
                     st.rerun()
@@ -360,6 +384,9 @@ def show_add_asset():
             warranty_date = st.date_input("Warranty Expiry Date", value=None)
             vendor = st.text_input("Vendor/Supplier")
             assigned_to = st.text_input("Assigned To (if In Use)")
+        
+        glpi_id = st.number_input("GLPI ID (Optional)", min_value=0, value=None, help="ใส่ ID ของ GLPI ถ้าทราบ เพื่อเชื่อมโยงข้อมูล")
+        
         department = st.text_input("Department / Location")
         specs = st.text_area("Specifications")
         image_blob = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
@@ -369,7 +396,7 @@ def show_add_asset():
             p_date_str = str(purchase_date) if purchase_date else None
             w_date_str = str(warranty_date) if warranty_date else None
             success, message = add_asset(asset_tag, category, model, serial_number, status, assigned_to,
-                p_date_str, price, w_date_str, vendor, department, image_blob, specs)
+                p_date_str, price, w_date_str, vendor, department, image_blob, specs, glpi_id=glpi_id)
             if success:
                 st.success("Asset added successfully!")
                 st.rerun()
