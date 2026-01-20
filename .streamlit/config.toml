@@ -1,0 +1,17 @@
+# This file is used to configure the Streamlit theme.
+# You can find more information about theming here:
+# https://docs.streamlit.io/library/advanced-features/theming
+
+[browser]
+gatherUsageStats = false
+
+[server]
+enableCORS = false
+enableXsrfProtection = true
+
+[theme]
+primaryColor="#f63366"
+backgroundColor="#000000"
+secondaryBackgroundColor="#262730"
+textColor="#fafafa"
+font="sans serif"
