@@ -1,3 +1,4 @@
+# pages.py
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -7,9 +8,8 @@ from PIL import Image
 from io import BytesIO
 from streamlit_drawable_canvas import st_canvas
 
-# Import helper functions from the main script
-# This assumes that the main script can provide these functions
-from inventory import (
+# Import from utils instead of inventory
+from utils import (
     load_data,
     calculate_depreciation,
     sync_glpi_data,
@@ -30,7 +30,7 @@ from inventory import (
     add_user,
     admin_change_user_password,
     delete_user,
-    GlpiApi  # Make sure GlpiApi is accessible
+    GlpiApi
 )
 
 def show_dashboard(df):
@@ -71,31 +71,15 @@ def show_dashboard(df):
 
 def show_glpi_sync():
     st.header("GLPI Data Sync")
-    
-    if 'glpi_df' not in st.session_state:
-        st.session_state.glpi_df = None
+    if 'glpi_df' not in st.session_state: st.session_state.glpi_df = None
 
-    st.markdown("""
-    This section allows you to fetch computer data from your GLPI instance and synchronize it with the local database.
-    **Recommended Setup:**
-    1. Create a file named `secrets.toml` in the `.streamlit` directory.
-    2. Add your GLPI credentials to this file like so:
-        ```toml
-        [glpi]
-        api_url = "https://your-glpi-url/apirest.php/"
-        app_token = "YOUR_APP_TOKEN"
-        user_token = "YOUR_USER_TOKEN" 
-        ```
-    """)
-
+    st.markdown("### GLPI Sync Configuration")
     glpi_creds = st.secrets.get("glpi", {})
 
     with st.form("glpi_form"):
-        st.subheader("GLPI Connection")
         api_url = st.text_input("API URL", value=glpi_creds.get("api_url", ""))
         app_token = st.text_input("App Token", value=glpi_creds.get("app_token", ""), type="password")
         user_token = st.text_input("User Token", value=glpi_creds.get("user_token", ""), type="password")
-        
         submitted = st.form_submit_button("Fetch GLPI Computers")
 
         if submitted:
@@ -113,8 +97,7 @@ def show_glpi_sync():
                     elif computers is not None:
                         st.success(f"Successfully fetched {len(computers)} computers!")
                         df = pd.DataFrame(computers)
-                        if 'users_id' in df.columns:
-                            df['users_id'] = df['users_id'].astype(str)
+                        if 'users_id' in df.columns: df['users_id'] = df['users_id'].astype(str)
                         st.session_state.glpi_df = df
                     else:
                         st.info("No computers found.")
@@ -129,8 +112,6 @@ def show_glpi_sync():
             with st.spinner("Synchronizing data..."):
                 inserts, updates, errors = sync_glpi_data(st.session_state.glpi_df)
                 st.success(f"Sync complete! Inserted: {inserts}, Updated: {updates}, Errors: {errors}")
-                if errors > 0:
-                    st.warning("Some records could not be synced. Check logs for details.")
                 st.rerun()
 
 def show_borrow_return(df):
@@ -157,35 +138,28 @@ def show_borrow_return(df):
                 if st.button("Confirm Borrow"):
                     if b_u and selected_items:
                         sig_image = Image.fromarray(signature.image_data) if signature.image_data is not None else None
-                        
                         pdf_items = []
                         success_count = 0
                         
                         for item_str in selected_items:
                             tag = item_str.split(" | ")[0]
                             item_data = df[df['asset_tag'] == tag].iloc[0]
-                            
                             success, msg = process_borrow(tag, b_u, b_n, signature_blob=sig_image)
                             if success:
                                 success_count += 1
                                 pdf_items.append({
-                                    'tag': tag, 
-                                    'model': item_data['model'],
-                                    'serial': item_data.get('serial_number', '-'),
-                                    'specs': item_data.get('specs', '-')
+                                    'tag': tag, 'model': item_data['model'],
+                                    'serial': item_data.get('serial_number', '-'), 'specs': item_data.get('specs', '-')
                                 })
-                            else:
-                                st.error(f"Error for {tag}: {msg}")
+                            else: st.error(f"Error for {tag}: {msg}")
                         
                         if success_count > 0:
                             pdf_bytes = create_professional_pdf(pdf_items, b_u, b_n, signature_img=sig_image)
                             st.success(f"Borrowed {success_count} items successfully!")
                             st.download_button("Download Handover PDF", pdf_bytes, f"Handover_{b_u}.pdf", "application/pdf")
-                            time.sleep(3); st.rerun()
-                    else:
-                        st.warning("Please select items and enter borrower name.")
-            else:
-                st.info("No items available to borrow.")
+                            time.sleep(2); st.rerun()
+                    else: st.warning("Please select items and enter borrower name.")
+            else: st.info("No items available to borrow.")
 
     with cr:
         with st.container(border=True):
@@ -208,26 +182,18 @@ def show_borrow_return(df):
                             for item_str in return_items:
                                 tag = item_str.split(" | ")[0]
                                 success, msg = process_return(tag, r_n)
-                                if success:
-                                    success_count += 1
-                                else:
-                                    st.error(f"Error for {tag}: {msg}")
+                                if success: success_count += 1
+                                else: st.error(f"Error for {tag}: {msg}")
                             
                             if success_count > 0:
                                 st.success(f"Returned {success_count} items successfully!")
                                 time.sleep(2); st.rerun()
-                        else:
-                            st.warning("Please select items to return.")
-                else:
-                    st.info("This user has no borrowed items.")
-            else:
-                st.info("No items are currently borrowed.")
-
-# ... Create similar functions for all other pages ...
+                        else: st.warning("Please select items to return.")
+                else: st.info("This user has no borrowed items.")
+            else: st.info("No items are currently borrowed.")
 
 def show_maintenance(df):
     st.header("🔧 Maintenance")
-    
     col1, col2 = st.columns(2)
 
     with col1:
@@ -249,10 +215,8 @@ def show_maintenance(df):
                         if success:
                             st.success("Asset sent for repair!")
                             st.rerun()
-                        else:
-                            st.error(f"Error: {message}")
-            else:
-                st.info("No 'In Stock' assets available to send for repair.")
+                        else: st.error(f"Error: {message}")
+            else: st.info("No 'In Stock' assets available.")
 
     with col2:
         with st.container(border=True):
@@ -273,66 +237,59 @@ def show_maintenance(df):
                         if success:
                             st.success("Repair finished and asset is now 'In Stock'.")
                             st.rerun()
-                        else:
-                            st.error(f"Error: {message}")
-            else:
-                st.info("No assets currently under repair.")
+                        else: st.error(f"Error: {message}")
+            else: st.info("No assets currently under repair.")
 
     st.markdown("---")
     st.subheader("Maintenance Log")
     maintenance_df = load_data("maintenance_logs")
     if not maintenance_df.empty:
         st.dataframe(maintenance_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No maintenance records found.")
+    else: st.info("No maintenance records found.")
 
 def show_audit(df):
     st.header("Asset Audit")
-    pass
+    if not df.empty:
+        df['display'] = df['asset_tag'] + " | " + df['model']
+        selected_asset = st.selectbox("Select Asset to Audit", df['display'].tolist())
+        if st.button("Mark Audited"):
+            tag = selected_asset.split(" | ")[0]
+            audit_asset(tag)
+            st.success(f"Audit timestamp updated for {tag}")
+            st.rerun()
+    else: st.info("No assets to audit.")
 
 def show_search(df):
     st.header("🔍 Search Assets")
-
     if df.empty:
         st.info("No assets to search.")
         return
 
     search_query = st.text_input("Search by Tag, Model, Serial, or Assigned User", "")
-    
     col1, col2 = st.columns(2)
-    with col1:
-        status_filter = st.multiselect("Filter by Status", df['status'].unique(), default=df['status'].unique())
-    with col2:
-        category_filter = st.multiselect("Filter by Category", df['category'].unique(), default=df['category'].unique())
+    with col1: status_filter = st.multiselect("Filter by Status", df['status'].unique(), default=df['status'].unique())
+    with col2: category_filter = st.multiselect("Filter by Category", df['category'].unique(), default=df['category'].unique())
 
-    # Apply filters
     filtered_df = df[df['status'].isin(status_filter) & df['category'].isin(category_filter)]
 
-    # Apply search query
     if search_query:
         query = search_query.lower()
-        # Ensure all columns are string type for searching to avoid errors
         search_cols = ['asset_tag', 'model', 'serial_number', 'assigned_to']
         filtered_df = filtered_df[
             filtered_df[search_cols].fillna('').astype(str).apply(
                 lambda x: x.str.lower().str.contains(query)
             ).any(axis=1)
         ]
-
     st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-
-    st.info(f"Showing {len(filtered_df)} of {len(df)} total assets.")
 
 def show_manage(df):
     st.header("🛠️ Manage Assets")
-
     if df.empty:
         st.info("No assets to manage.")
         return
 
     df['display'] = df['asset_tag'] + " | " + df['model'] + " | " + df['assigned_to'].fillna('')
     asset_list = df['display'].tolist()
-    
     selected_asset_str = st.selectbox("Select Asset to Manage", asset_list, index=None, placeholder="Search for an asset...")
 
     if selected_asset_str:
@@ -341,7 +298,6 @@ def show_manage(df):
 
         with st.form("manage_asset_form"):
             st.subheader(f"Editing: {asset_data['asset_tag']}")
-            
             c1, c2 = st.columns(2)
             with c1:
                 model = st.text_input("Model", value=asset_data.get('model'))
@@ -350,44 +306,31 @@ def show_manage(df):
                 status = st.selectbox("Status", ["In Stock", "In Use", "Repair", "Retired"], index=["In Stock", "In Use", "Repair", "Retired"].index(asset_data.get('status', 'In Stock')))
 
             with c2:
-                # Handle date conversion carefully
-                try:
-                    p_date_val = datetime.strptime(str(asset_data.get('purchase_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('purchase_date') else None
-                except (ValueError, TypeError):
-                    p_date_val = None
+                try: p_date_val = datetime.strptime(str(asset_data.get('purchase_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('purchase_date') else None
+                except: p_date_val = None
                 purchase_date = st.date_input("Purchase Date", value=p_date_val)
-                
                 price = st.number_input("Price", min_value=0.0, step=100.0, value=float(asset_data.get('price', 0.0)))
-                
-                try:
-                    w_date_val = datetime.strptime(str(asset_data.get('warranty_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('warranty_date') else None
-                except (ValueError, TypeError):
-                    w_date_val = None
+                try: w_date_val = datetime.strptime(str(asset_data.get('warranty_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('warranty_date') else None
+                except: w_date_val = None
                 warranty_date = st.date_input("Warranty Expiry Date", value=w_date_val)
-                
                 vendor = st.text_input("Vendor/Supplier", value=asset_data.get('vendor'))
 
             assigned_to = st.text_input("Assigned To", value=asset_data.get('assigned_to'))
             department = st.text_input("Department / Location", value=asset_data.get('department'))
             specs = st.text_area("Specifications", value=asset_data.get('specs'))
             
-            # Form submission buttons
             update_button = st.form_submit_button("💾 Update Asset", type="primary")
             delete_button = st.form_submit_button("🗑️ Delete Asset (to Bin)")
 
             if update_button:
                 p_date_str = str(purchase_date) if purchase_date else None
                 w_date_str = str(warranty_date) if warranty_date else None
-                
-                success, message = update_asset(
-                    asset_tag, category, model, serial_number, status, assigned_to,
-                    p_date_str, price, w_date_str, vendor, department, specs
-                )
+                success, message = update_asset(asset_tag, category, model, serial_number, status, assigned_to,
+                    p_date_str, price, w_date_str, vendor, department, specs)
                 if success:
                     st.success("Asset updated successfully!")
                     st.rerun()
-                else:
-                    st.error(f"Failed to update asset: {message}")
+                else: st.error(f"Failed to update asset: {message}")
 
             if delete_button:
                 soft_delete(asset_tag)
@@ -396,66 +339,79 @@ def show_manage(df):
 
 def show_add_asset():
     st.header("➕ Add New Asset")
-
     with st.form("add_asset_form", clear_on_submit=True):
         st.subheader("Asset Details")
-        
         c1, c2 = st.columns(2)
         with c1:
-            asset_tag = st.text_input("Asset Tag (Unique ID)", help="e.g., COMP-00123")
-            model = st.text_input("Model", help="e.g., Dell Latitude 5420")
+            asset_tag = st.text_input("Asset Tag (Unique ID)")
+            model = st.text_input("Model")
             category = st.selectbox("Category", ["Laptop", "Desktop", "Monitor", "Printer", "Network Gear", "Other"])
             serial_number = st.text_input("Serial Number")
             status = st.selectbox("Status", ["In Stock", "In Use", "Repair", "Retired"])
-
         with c2:
             purchase_date = st.date_input("Purchase Date", value=None)
             price = st.number_input("Price", min_value=0.0, step=100.0)
             warranty_date = st.date_input("Warranty Expiry Date", value=None)
             vendor = st.text_input("Vendor/Supplier")
             assigned_to = st.text_input("Assigned To (if In Use)")
-
         department = st.text_input("Department / Location")
-        specs = st.text_area("Specifications", help="e.g., RAM: 16GB, CPU: Intel i5, Storage: 512GB SSD")
-        
-        st.subheader("Asset Image")
+        specs = st.text_area("Specifications")
         image_blob = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
         
         submitted = st.form_submit_button("Add Asset", type="primary")
-
         if submitted:
-            # Convert date objects to string, or None if not set
             p_date_str = str(purchase_date) if purchase_date else None
             w_date_str = str(warranty_date) if warranty_date else None
-            
-            success, message = add_asset(
-                asset_tag, category, model, serial_number, status, assigned_to,
-                p_date_str, price, w_date_str, vendor, department, image_blob, specs
-            )
-            
+            success, message = add_asset(asset_tag, category, model, serial_number, status, assigned_to,
+                p_date_str, price, w_date_str, vendor, department, image_blob, specs)
             if success:
                 st.success("Asset added successfully!")
-                st.balloons()
-            else:
-                st.error(f"Failed to add asset: {message}")
+                st.rerun()
+            else: st.error(f"Failed to add asset: {message}")
 
 def show_qr_code(df):
     st.header("QR Code Generator")
-    pass
+    if not df.empty:
+        df['display'] = df['asset_tag'] + " | " + df['model']
+        selected_assets = st.multiselect("Select Assets for QR Code", df['display'].tolist())
+        if st.button("Generate QR Codes"):
+            if selected_assets:
+                data_list = []
+                for item in selected_assets:
+                    tag = item.split(" | ")[0]
+                    row = df[df['asset_tag'] == tag].iloc[0]
+                    data_list.append({'tag': tag, 'model': row['model'], 'dept': row.get('department', 'Common')})
+                
+                pdf_bytes = create_bulk_qr_pdf(data_list)
+                st.download_button("Download QR Codes (PDF)", pdf_bytes, "qr_codes.pdf", "application/pdf")
+            else: st.warning("Please select at least one asset.")
+    else: st.info("No assets available.")
 
 def show_logs_reprint():
     st.header("Logs & Document Reprint")
-    pass
+    st.subheader("Recent Borrowing Logs")
+    logs = load_data("borrow_logs")
+    st.dataframe(logs, use_container_width=True, hide_index=True)
 
 def show_bin():
     st.header("Recycle Bin")
-    pass
+    bin_df = load_data("recycle_bin")
+    if not bin_df.empty:
+        st.dataframe(bin_df)
+        bin_df['display'] = bin_df['asset_tag'] + " | " + bin_df['model']
+        selected = st.selectbox("Select Asset to Restore", bin_df['display'].tolist())
+        if st.button("Restore Asset"):
+            tag = selected.split(" | ")[0]
+            res, msg = restore_asset(tag)
+            if res:
+                st.success("Asset Restored!")
+                st.rerun()
+            else: st.error(msg)
+    else: st.info("Recycle Bin is empty.")
 
 def show_admin_page():
     st.header("👨‍💼 Admin Tools")
-
     st.subheader("User Management")
-
     col1, col2 = st.columns(2)
 
     with col1:
@@ -467,11 +423,8 @@ def show_admin_page():
                 submitted = st.form_submit_button("Add User")
                 if submitted:
                     success, message = add_user(new_username, new_password)
-                    if success:
-                        st.success(message)
-                        st.rerun()
-                    else:
-                        st.error(message)
+                    if success: st.success(message); st.rerun()
+                    else: st.error(message)
         
         with st.container(border=True):
             st.subheader("Change User Password")
@@ -484,10 +437,8 @@ def show_admin_page():
                     submitted = st.form_submit_button("Change Password")
                     if submitted:
                         success, message = admin_change_user_password(selected_user, new_password)
-                        if success:
-                            st.success(message)
-                        else:
-                            st.error(message)
+                        if success: st.success(message)
+                        else: st.error(message)
 
     with col2:
         with st.container(border=True):
@@ -495,22 +446,9 @@ def show_admin_page():
             users_df = get_all_users()
             if not users_df.empty:
                 st.dataframe(users_df, use_container_width=True, hide_index=True)
-                
                 user_to_delete = st.selectbox("Select User to Delete", users_df['username'].tolist(), index=None, placeholder="Select user...")
                 if user_to_delete and st.button(f"Delete {user_to_delete}", type="primary"):
                     success, message = delete_user(user_to_delete)
-                    if success:
-                        st.success(message)
-                        st.rerun()
-                    else:
-                        st.error(message)
-            else:
-                st.info("No users found.")
-
-    st.markdown("---")
-    
-    st.subheader("⚠️ Password Management")
-    st.warning("The ability to reset all passwords to a default has been removed for security reasons. Please change user passwords individually above.")
-    
-    if st.button("🔧 Migrate Passwords", disabled=True):
-        st.info("Password migration is now handled automatically on startup.")
+                    if success: st.success(message); st.rerun()
+                    else: st.error(message)
+            else: st.info("No users found.")
