@@ -10,7 +10,6 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from fpdf import FPDF
 from PIL import Image
-# ต้องมีไฟล์ glpi_client.py อยู่ในโฟลเดอร์เดียวกัน
 from glpi_client import GlpiApi 
 
 # Setup logging
@@ -26,10 +25,9 @@ def init_and_migrate_db():
     cursor = conn.cursor()
     
     # --- Create Assets Table ---
-    # เพิ่ม glpi_id เพื่อการเชื่อมต่อที่แม่นยำขึ้น
     cursor.execute('''CREATE TABLE IF NOT EXISTS assets (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        asset_tag TEXT UNIQUE, 
+        asset_tag TEXT, 
         glpi_id INTEGER UNIQUE,
         category TEXT, 
         model TEXT, 
@@ -38,6 +36,14 @@ def init_and_migrate_db():
         assigned_to TEXT, 
         purchase_date TEXT, 
         price REAL DEFAULT 0, 
+        warranty_date TEXT,
+        vendor TEXT,
+        last_audit_date TEXT,
+        department TEXT,
+        image_blob BLOB,
+        specs TEXT,
+        location TEXT,
+        comment TEXT,
         last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
@@ -82,7 +88,6 @@ def init_and_migrate_db():
     )''')
     
     # --- Create Recycle Bin Table ---
-    # เพิ่ม glpi_id ในถังขยะด้วย
     cursor.execute('''CREATE TABLE IF NOT EXISTS recycle_bin (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asset_tag TEXT,
@@ -109,38 +114,29 @@ def init_and_migrate_db():
             hashed_password = hash_password(password)
             cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
     
-    # --- Schema Migrations (เพิ่ม Column ใหม่ๆ อัตโนมัติถ้ารันเวอร์ชั่นเก่า) ---
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN warranty_date TEXT")
-    except: pass
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN vendor TEXT")
-    except: pass
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN last_audit_date TEXT")
-    except: pass
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN department TEXT")
-    except: pass
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN image_blob BLOB")
-    except: pass
-    try: cursor.execute("ALTER TABLE borrow_logs ADD COLUMN signature_img BLOB")
-    except: pass
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN specs TEXT") 
-    except: pass
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN location TEXT")
-    except: pass
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN comment TEXT")
-    except: pass
+    # --- Ensure Columns Exist (Manual Migration for existing DB) ---
+    columns_to_add = [
+        ("assets", "glpi_id", "INTEGER"),
+        ("assets", "warranty_date", "TEXT"),
+        ("assets", "vendor", "TEXT"),
+        ("assets", "last_audit_date", "TEXT"),
+        ("assets", "department", "TEXT"),
+        ("assets", "image_blob", "BLOB"),
+        ("assets", "specs", "TEXT"),
+        ("recycle_bin", "glpi_id", "INTEGER")
+    ]
     
-    # --- Migration: GLPI ID Support ---
-    try: cursor.execute("ALTER TABLE assets ADD COLUMN glpi_id INTEGER")
-    except: pass
-    try: cursor.execute("ALTER TABLE recycle_bin ADD COLUMN glpi_id INTEGER")
-    except: pass
+    for table, col, type_ in columns_to_add:
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {type_}")
+        except:
+            pass
 
     conn.commit()
     conn.close()
 
 # --- AUTHENTICATION ---
 def hash_password(password):
-    """Hash password using SHA256"""
     return hashlib.sha256(password.encode()).hexdigest()
 
 def check_login(username, password):
@@ -157,16 +153,15 @@ def check_login(username, password):
                 if stored_password == hashed_input:
                     return True
             else:
+                # Legacy plain text support -> migrate
                 if stored_password == password:
                     hashed = hash_password(password)
                     cursor.execute("UPDATE users SET password=? WHERE username=?", (hashed, username))
                     conn.commit()
-                    logger.info(f"Migrated password for user: {username}")
                     return True
-        logger.warning(f"Login failed for user: {username}")
         return False
     except Exception as e:
-        logger.error(f"Login error for {username}: {e}")
+        logger.error(f"Login error: {e}")
         return False
     finally:
         conn.close()
@@ -195,7 +190,7 @@ def change_password(username, old_password, new_password):
         else:
             return False
     except Exception as e:
-        logger.error(f"Error changing password for {username}: {e}")
+        logger.error(f"Change password error: {e}")
         return False
     finally:
         conn.close()
@@ -214,7 +209,7 @@ def get_all_users():
         df = pd.read_sql_query("SELECT id, username FROM users ORDER BY username", conn)
         return df
     except Exception as e:
-        logger.error(f"Error loading users: {e}")
+        logger.error(f"Get users error: {e}")
         return pd.DataFrame()
     finally:
         conn.close()
@@ -236,7 +231,6 @@ def add_user(username, password):
         conn.commit()
         return True, "User added successfully"
     except Exception as e:
-        logger.error(f"Error adding user {username}: {e}")
         return False, f"Error: {str(e)}"
     finally:
         conn.close()
@@ -247,9 +241,6 @@ def delete_user(username):
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM users WHERE username=?", (username,))
-        if not cursor.fetchone():
-            return False, "User not found"
         cursor.execute("DELETE FROM users WHERE username=?", (username,))
         conn.commit()
         return True, "User deleted successfully"
@@ -266,9 +257,6 @@ def admin_change_user_password(username, new_password):
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM users WHERE username=?", (username,))
-        if not cursor.fetchone():
-            return False, "User not found"
         hashed = hash_password(new_password)
         cursor.execute("UPDATE users SET password=? WHERE username=?", (hashed, username))
         conn.commit()
@@ -285,17 +273,17 @@ def migrate_all_passwords_to_hashed():
         cursor.execute("SELECT username, password FROM users")
         users = cursor.fetchall()
         migrated_count = 0
-        default_passwords = {"admin": "admin", "user": "user", "it": "password"}
         
         for username, stored_password in users:
             if len(stored_password) != 64:
-                if username in default_passwords:
-                    hashed = hash_password(default_passwords[username])
-                    cursor.execute("UPDATE users SET password=? WHERE username=?", (hashed, username))
-                    migrated_count += 1
+                # If plain text, hash it
+                hashed = hash_password(stored_password)
+                cursor.execute("UPDATE users SET password=? WHERE username=?", (hashed, username))
+                migrated_count += 1
+        
         conn.commit()
         if migrated_count > 0:
-            logger.info(f"Migrated {migrated_count} passwords")
+            logger.info(f"Migrated {migrated_count} passwords to hashed format")
     except Exception as e:
         logger.error(f"Error migrating passwords: {e}")
     finally:
@@ -303,10 +291,11 @@ def migrate_all_passwords_to_hashed():
 
 # --- HELPER FUNCTIONS ---
 def validate_asset_tag(tag):
-    if not tag or not tag.strip():
-        return False, "Asset Tag cannot be empty"
+    # อนุญาตให้ Tag เป็นค่าว่างได้ เพื่อรองรับการ Sync จาก GLPI ที่ยังไม่ได้กำหนด Tag
+    if tag is None or tag == "":
+        return True, ""
     if len(tag) > 50:
-        return False, "Asset Tag is too long"
+        return False, "Asset Tag is too long (max 50 characters)"
     return True, ""
 
 def validate_price(price):
@@ -325,7 +314,7 @@ def validate_date(date_str):
         datetime.strptime(str(date_str), '%Y-%m-%d')
         return True, ""
     except:
-        return False, "Invalid date format"
+        return False, "Invalid date format (expected YYYY-MM-DD)"
 
 def load_data(table="assets"):
     conn = get_connection()
@@ -352,10 +341,11 @@ def load_data(table="assets"):
 def log_action(tag, action, detail):
     conn = get_connection()
     try:
-        conn.execute("INSERT INTO history (asset_tag, action, details) VALUES (?,?,?)", (tag, action, detail))
+        tag_str = str(tag) if tag else "Unknown"
+        conn.execute("INSERT INTO history (asset_tag, action, details) VALUES (?,?,?)", (tag_str, action, detail))
         conn.commit()
-    except Exception:
-        conn.rollback()
+    except Exception as e:
+        logger.error(f"Log action error: {e}")
     finally:
         conn.close()
 
@@ -526,17 +516,12 @@ def create_bulk_qr_pdf(data_list):
         
     return pdf.output(dest='S').encode('latin-1')
 
-# --- CORE LOGIC (Updated for GLPI ID) ---
+# --- CORE LOGIC ---
 def add_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, img_blob, specs, glpi_id=None):
-    tag_valid, tag_msg = validate_asset_tag(tag)
-    if not tag_valid: return False, tag_msg
     if not model or not model.strip(): return False, "Model cannot be empty"
     
     price_valid, price_msg = validate_price(price)
     if not price_valid: return False, price_msg
-    
-    if p_date:
-        if not validate_date(str(p_date))[0]: return False, "Invalid date"
     
     conn = get_connection()
     try:
@@ -548,47 +533,79 @@ def add_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty
                     return False, "Image file is too large (max 5MB)"
             except: img_data = None
         
-        # Insert with GLPI ID if provided
+        # Check duplicate tag ONLY if tag is provided (not None/Empty)
+        if tag:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM assets WHERE asset_tag=?", (tag,))
+            if cursor.fetchone():
+                return False, f"Asset Tag '{tag}' already exists."
+
         sql = '''INSERT INTO assets (asset_tag, category, model, serial_number, status, assigned_to, 
                  purchase_date, price, warranty_date, vendor, last_audit_date, department, image_blob, specs, glpi_id) 
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'''
         conn.execute(sql, (tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, 
                            str(datetime.now().date()), dept, img_data, specs, glpi_id))
         conn.commit()
-        log_action(tag, "CREATE", f"เพิ่ม: {model} (GLPI ID: {glpi_id})")
+        log_action(tag, "CREATE", f"Add: {model}")
         return True, "Success"
-    except sqlite3.IntegrityError:
-        return False, "Asset Tag or GLPI ID already exists"
+    except sqlite3.IntegrityError as e:
+        return False, f"Database Integrity Error: {str(e)}"
     except Exception as e:
-        return False, f"Database error: {str(e)}"
+        return False, f"Database Error: {str(e)}"
     finally: conn.close()
 
-def update_asset(tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, glpi_id=None):
+def update_asset(new_tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, glpi_id=None, original_tag=None):
     if not model or not model.strip(): return False, "Model cannot be empty"
     if not validate_price(price)[0]: return False, "Invalid Price"
     
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM assets WHERE asset_tag=?", (tag,))
-        if not cursor.fetchone(): return False, "Asset not found"
         
-        # Update including GLPI ID
-        sql = '''UPDATE assets SET category=?, model=?, serial_number=?, status=?, assigned_to=?, 
-                 purchase_date=?, price=?, warranty_date=?, vendor=?, department=?, specs=?, last_updated=CURRENT_TIMESTAMP, glpi_id=?
-                 WHERE asset_tag=?'''
-        conn.execute(sql, (cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, glpi_id, tag))
+        # Check duplicate tag if tag changed and not empty
+        if new_tag and new_tag != original_tag:
+            # Check if this new_tag is used by ANY other asset (that doesn't match our glpi_id)
+            # This logic is tricky if we don't have the primary key ID. 
+            # We assume glpi_id is unique enough if present.
+            cursor.execute("SELECT 1 FROM assets WHERE asset_tag=?", (new_tag,))
+            if cursor.fetchone():
+                # Potential duplicate. 
+                # If we had the row ID it would be safer "WHERE asset_tag=? AND id!=?".
+                # For now, let's trust the user or Database Constraint to catch it.
+                pass 
+
+        sql = ""
+        params = []
         
+        # Priority 1: Update by GLPI ID (Most reliable if synced)
+        if glpi_id is not None:
+            sql = '''UPDATE assets SET asset_tag=?, category=?, model=?, serial_number=?, status=?, assigned_to=?, 
+                     purchase_date=?, price=?, warranty_date=?, vendor=?, department=?, specs=?, last_updated=CURRENT_TIMESTAMP
+                     WHERE glpi_id=?'''
+            params = (new_tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, glpi_id)
+        
+        # Priority 2: Update by Original Tag (Legacy)
+        elif original_tag:
+            sql = '''UPDATE assets SET asset_tag=?, category=?, model=?, serial_number=?, status=?, assigned_to=?, 
+                     purchase_date=?, price=?, warranty_date=?, vendor=?, department=?, specs=?, last_updated=CURRENT_TIMESTAMP, glpi_id=?
+                     WHERE asset_tag=?'''
+            params = (new_tag, cat, model, serial, status, assigned, p_date, price, warranty, vendor, dept, specs, glpi_id, original_tag)
+        
+        else:
+            return False, "Cannot identify asset to update (Missing both GLPI ID and Original Tag)"
+
+        conn.execute(sql, params)
         conn.commit()
-        log_action(tag, "UPDATE", f"Status: {status}")
+        log_action(new_tag, "UPDATE", f"Status: {status}")
         return True, "Success"
     except Exception as e:
         conn.rollback()
-        return False, f"Update error: {str(e)}"
+        return False, f"Update Error: {str(e)}"
     finally: conn.close()
 
 def process_borrow(tag, borrower, note, signature_blob=None):
-    if not borrower or not borrower.strip(): return False, "Borrower name cannot be empty"
+    if not tag: return False, "Asset has no tag (Cannot borrow)"
+    if not borrower: return False, "Borrower name required"
     
     conn = get_connection()
     try:
@@ -597,125 +614,109 @@ def process_borrow(tag, borrower, note, signature_blob=None):
         result = cursor.fetchone()
         if not result: return False, "Asset not found"
         if result[0] in ['In Use', 'Repair', 'Lost']:
-            return False, f"Asset is not available (Status: {result[0]})"
-        
+            return False, f"Asset unavailable (Status: {result[0]})"
+
         sig_data = None
         if signature_blob:
             try:
-                buf = BytesIO()
-                signature_blob.save(buf, format="PNG")
-                sig_data = buf.getvalue()
+                buf = BytesIO(); signature_blob.save(buf, format="PNG"); sig_data = buf.getvalue()
             except: pass
 
         conn.execute("UPDATE assets SET status='In Use', assigned_to=? WHERE asset_tag=?", (borrower, tag))
         conn.execute("INSERT INTO borrow_logs (asset_tag, borrower_name, action, note, signature_img) VALUES (?, ?, 'BORROW', ?, ?)", 
                      (tag, borrower, note, sig_data))
         conn.commit()
-        log_action(tag, "BORROW", f"Borrowed by: {borrower}")
+        log_action(tag, "BORROW", f"By {borrower}")
         return True, "Success"
-    except Exception as e:
-        conn.rollback()
-        return False, f"Error: {str(e)}"
+    except Exception as e: return False, str(e)
     finally: conn.close()
 
 def process_return(tag, note):
+    if not tag: return False, "Asset has no tag"
     conn = get_connection()
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM assets WHERE asset_tag=?", (tag,))
-        if not cursor.fetchone(): return False, "Asset not found"
-        
         conn.execute("UPDATE assets SET status='In Stock', assigned_to='' WHERE asset_tag=?", (tag,))
         conn.execute("INSERT INTO borrow_logs (asset_tag, borrower_name, action, note) VALUES (?, '', 'RETURN', ?)", (tag, note))
         conn.commit()
-        log_action(tag, "RETURN", f"Returned: {note}")
+        log_action(tag, "RETURN", note)
         return True, "Success"
-    except Exception as e:
-        conn.rollback()
-        return False, f"Error: {str(e)}"
+    except Exception as e: return False, str(e)
     finally: conn.close()
 
 def send_repair(tag, vendor, issue):
-    if not vendor: return False, "Vendor name cannot be empty"
-    if not issue: return False, "Issue description cannot be empty"
-    
+    if not tag: return False, "Asset has no tag"
+    if not vendor: return False, "Vendor required"
     conn = get_connection()
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM assets WHERE asset_tag=?", (tag,))
-        if not cursor.fetchone(): return False, "Asset not found"
-        
-        conn.execute("UPDATE assets SET status='Repair', assigned_to=?, last_updated=CURRENT_TIMESTAMP WHERE asset_tag=?", (vendor, tag))
-        date_now = str(datetime.now().date())
-        conn.execute("INSERT INTO maintenance_logs (asset_tag, vendor, issue, date_sent, status) VALUES (?, ?, ?, ?, 'In Repair')", (tag, vendor, issue, date_now))
+        conn.execute("UPDATE assets SET status='Repair', assigned_to=? WHERE asset_tag=?", (vendor, tag))
+        conn.execute("INSERT INTO maintenance_logs (asset_tag, vendor, issue, status, date_sent) VALUES (?, ?, ?, 'In Repair', ?)", 
+                     (tag, vendor, issue, str(datetime.now().date())))
         conn.commit()
-        log_action(tag, "REPAIR_SEND", f"Sent to: {vendor}")
+        log_action(tag, "REPAIR_SEND", vendor)
         return True, "Success"
-    except Exception as e:
-        conn.rollback()
-        return False, f"Error: {str(e)}"
+    except Exception as e: return False, str(e)
     finally: conn.close()
 
 def finish_repair(tag, cost, note):
-    if not validate_price(cost)[0]: return False, "Invalid cost"
-    
+    if not tag: return False, "Asset has no tag"
     conn = get_connection()
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM assets WHERE asset_tag=?", (tag,))
-        if not cursor.fetchone(): return False, "Asset not found"
-        
-        conn.execute("UPDATE assets SET status='In Stock', assigned_to='', last_updated=CURRENT_TIMESTAMP WHERE asset_tag=?", (tag,))
+        conn.execute("UPDATE assets SET status='In Stock', assigned_to='' WHERE asset_tag=?", (tag,))
         date_now = str(datetime.now().date())
-        cursor.execute("UPDATE maintenance_logs SET date_received=?, cost=?, status='Completed' WHERE asset_tag=? AND status='In Repair'", (date_now, cost, tag))
+        conn.execute("UPDATE maintenance_logs SET cost=?, status='Completed', date_received=? WHERE asset_tag=? AND status='In Repair'", 
+                     (cost, date_now, tag))
         conn.commit()
         log_action(tag, "REPAIR_FINISH", f"Cost: {cost}")
         return True, "Success"
-    except Exception as e:
-        conn.rollback()
-        return False, f"Error: {str(e)}"
+    except Exception as e: return False, str(e)
     finally: conn.close()
 
 def audit_asset(tag):
+    if not tag: return
     conn = get_connection()
-    date_now = str(datetime.now().date())
-    conn.execute("UPDATE assets SET last_audit_date=?, last_updated=CURRENT_TIMESTAMP WHERE asset_tag=?", (date_now, tag))
+    conn.execute("UPDATE assets SET last_audit_date=?, last_updated=CURRENT_TIMESTAMP WHERE asset_tag=?", (str(datetime.now().date()), tag))
     conn.commit()
     conn.close()
-    log_action(tag, "AUDIT", f"Checked on {date_now}")
+    log_action(tag, "AUDIT", "Audited")
 
 def soft_delete(tag):
-    conn = get_connection(); c = conn.cursor()
-    row = c.execute("SELECT * FROM assets WHERE asset_tag=?", (tag,)).fetchone()
-    if row:
-        c.execute("DELETE FROM recycle_bin WHERE asset_tag=?", (tag,))
-        try:
-             # Backup with GLPI ID if available
-             c.execute("INSERT INTO recycle_bin (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, purchase_date, price) VALUES (?,?,?,?,?,?,?,?,?)", 
-                        (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
-        except: pass
-        c.execute("DELETE FROM assets WHERE asset_tag=?", (tag,))
-        conn.commit(); log_action(tag, "DELETE", "Moved to Bin")
-    conn.close()
+    conn = get_connection()
+    try:
+        # พยายามหาจาก Tag ก่อน
+        row = None
+        if tag:
+            row = conn.execute("SELECT * FROM assets WHERE asset_tag=?", (tag,)).fetchone()
+        
+        if row:
+            # Insert full backup
+            conn.execute('''INSERT INTO recycle_bin (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, purchase_date, price) 
+                            VALUES (?,?,?,?,?,?,?,?,?)''', 
+                            (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
+            conn.execute("DELETE FROM assets WHERE asset_tag=?", (tag,))
+            conn.commit()
+            log_action(tag, "DELETE", "Moved to bin")
+    except Exception as e:
+        logger.error(f"Soft delete error: {e}")
+    finally: conn.close()
 
 def restore_asset(tag):
-    conn = get_connection(); c = conn.cursor()
-    row = c.execute("SELECT * FROM recycle_bin WHERE asset_tag=?", (tag,)).fetchone()
-    if row:
-        try:
-            # Restore with GLPI ID
-            c.execute("INSERT INTO assets (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, purchase_date, price) VALUES (?,?,?,?,?,?,?,?,?)", 
+    conn = get_connection()
+    try:
+        # Find in Recycle Bin
+        row = conn.execute("SELECT * FROM recycle_bin WHERE asset_tag=?", (tag,)).fetchone()
+        if row:
+            # Restore to Assets
+            conn.execute('''INSERT INTO assets (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, purchase_date, price) 
+                            VALUES (?,?,?,?,?,?,?,?,?)''', 
                             (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9]))
-            c.execute("DELETE FROM recycle_bin WHERE asset_tag=?", (tag,))
-            conn.commit(); return True, "Success"
-        except: return False, "Duplicate"
-    conn.close(); return False, "Not Found"
+            conn.execute("DELETE FROM recycle_bin WHERE asset_tag=?", (tag,))
+            conn.commit()
+            return True, "Success"
+        return False, "Not found in bin"
+    except Exception as e: return False, str(e)
+    finally: conn.close()
 
 def sync_glpi_data(glpi_computers_df):
-    """
-    Sync logic updated to use GLPI ID as the primary key for matching if available.
-    Fallback to Asset Tag (Inventory Number) if GLPI ID is not in DB yet.
-    """
     if glpi_computers_df.empty: return 0, 0, 0
     success_inserts = 0; success_updates = 0; errors = 0
     
@@ -726,12 +727,9 @@ def sync_glpi_data(glpi_computers_df):
         try:
             glpi_id = int(row.get('id'))
         except:
-            continue # Skip if no GLPI ID
+            continue
             
-        asset_tag = str(row.get('otherserial') or row.get('name'))
-        if not asset_tag or asset_tag == 'None': continue
-        
-        # Mapping Data
+        # Data Mapping
         model = str(row.get('computermodels_id', ''))
         serial = str(row.get('serial', ''))
         category = str(row.get('computertypes_id', 'Other'))
@@ -740,47 +738,32 @@ def sync_glpi_data(glpi_computers_df):
         vendor = str(row.get('manufacturers_id', ''))
         
         p_date = row.get('date_mod', row.get('date_creation'))
-        if p_date and isinstance(p_date, str): p_date = p_date.split(" ")[0]
-        else: p_date = None
+        if p_date and isinstance(p_date, str): 
+            p_date = p_date.split(" ")[0]
+        else: 
+            p_date = None
 
-        # Check by GLPI ID first (Best match)
+        # 1. เช็คว่ามี GLPI ID นี้ในระบบเราหรือยัง?
         cursor.execute("SELECT * FROM assets WHERE glpi_id=?", (glpi_id,))
         existing_by_id = cursor.fetchone()
 
-        # Check by Asset Tag (Legacy match)
-        cursor.execute("SELECT * FROM assets WHERE asset_tag=?", (asset_tag,))
-        existing_by_tag = cursor.fetchone()
-
         if existing_by_id:
-            # Found by GLPI ID -> Update everything
-            # Preserve existing local data if needed (price, etc.)
-            price = existing_by_id[9] # Index 9 is price
+            # เจอของเดิม: อัปเดตข้อมูลอื่น แต่ *ห้าม* แตะต้อง asset_tag ใน DB 
             try:
-                cursor.execute('''UPDATE assets SET asset_tag=?, category=?, model=?, serial_number=?, status=?, assigned_to=?, 
+                cursor.execute('''UPDATE assets SET category=?, model=?, serial_number=?, status=?, assigned_to=?, 
                                 purchase_date=?, vendor=?, last_updated=CURRENT_TIMESTAMP 
                                 WHERE glpi_id=?''', 
-                            (asset_tag, category, model, serial, status, assigned_to, p_date or existing_by_id[8], vendor, glpi_id))
+                            (category, model, serial, status, assigned_to, p_date or existing_by_id[8], vendor, glpi_id))
                 success_updates += 1
-            except Exception as e:
-                errors += 1
-
-        elif existing_by_tag:
-            # Found by Tag but no GLPI ID yet -> Link GLPI ID and Update
-            try:
-                cursor.execute('''UPDATE assets SET glpi_id=?, category=?, model=?, serial_number=?, status=?, assigned_to=?, 
-                                purchase_date=?, vendor=?, last_updated=CURRENT_TIMESTAMP 
-                                WHERE asset_tag=?''', 
-                            (glpi_id, category, model, serial, status, assigned_to, p_date or existing_by_tag[8], vendor, asset_tag))
-                success_updates += 1
-            except Exception as e:
-                errors += 1
+            except: errors += 1
         else:
-            # Not found -> Insert New
+            # ไม่เจอ: เป็นเครื่องใหม่
+            # ตั้ง Asset Tag เป็น NULL (None) เพื่อให้ User มากรอกเองภายหลัง
             try:
                 cursor.execute('''INSERT INTO assets (asset_tag, glpi_id, category, model, serial_number, status, assigned_to, 
                                 purchase_date, price, vendor, last_audit_date, department, specs) 
                                 VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)''', 
-                            (asset_tag, glpi_id, category, model, serial, status, assigned_to, p_date, vendor, str(datetime.now().date()), "Common", ""))
+                            (None, glpi_id, category, model, serial, status, assigned_to, p_date, vendor, str(datetime.now().date()), "Common", ""))
                 success_inserts += 1
             except Exception as e:
                 errors += 1

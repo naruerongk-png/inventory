@@ -123,7 +123,8 @@ def show_borrow_return(df):
     with cb:
         with st.container(border=True):
             st.subheader("Borrow Assets")
-            stock = df[~df['status'].isin(['In Use', 'Retired', 'Repair', 'Lost'])]
+            # Only allow borrowing assets that HAVE a tag
+            stock = df[(~df['status'].isin(['In Use', 'Retired', 'Repair', 'Lost'])) & (df['asset_tag'].notna()) & (df['asset_tag'] != "")]
             
             if not stock.empty:
                 stock['display'] = stock['asset_tag'] + " | " + stock['model']
@@ -161,7 +162,7 @@ def show_borrow_return(df):
                             st.download_button("Download Handover PDF", pdf_bytes, f"Handover_{b_u}.pdf", "application/pdf")
                             time.sleep(2); st.rerun()
                     else: st.warning("Please select items and enter borrower name.")
-            else: st.info("No items available to borrow.")
+            else: st.info("No items available to borrow (or assets have no tags).")
 
     with cr:
         with st.container(border=True):
@@ -203,7 +204,7 @@ def show_maintenance(df):
             st.subheader("Send for Repair")
             available_assets = df[df['status'] == 'In Stock']
             if not available_assets.empty:
-                available_assets['display'] = available_assets['asset_tag'] + " | " + available_assets['model']
+                available_assets['display'] = available_assets.apply(lambda x: f"{x['asset_tag'] if x['asset_tag'] else '[No Tag]'} | {x['model']}", axis=1)
                 asset_to_repair = st.selectbox("Select Asset", available_assets['display'].tolist(), index=None)
                 
                 with st.form("send_repair_form"):
@@ -212,12 +213,15 @@ def show_maintenance(df):
                     submitted = st.form_submit_button("Send for Repair")
 
                     if submitted and asset_to_repair:
-                        asset_tag = asset_to_repair.split(" | ")[0]
-                        success, message = send_repair(asset_tag, vendor, issue)
-                        if success:
-                            st.success("Asset sent for repair!")
-                            st.rerun()
-                        else: st.error(f"Error: {message}")
+                        tag_part = asset_to_repair.split(" | ")[0]
+                        if tag_part == "[No Tag]":
+                            st.error("Cannot repair asset without Asset Tag.")
+                        else:
+                            success, message = send_repair(tag_part, vendor, issue)
+                            if success:
+                                st.success("Asset sent for repair!")
+                                st.rerun()
+                            else: st.error(f"Error: {message}")
             else: st.info("No 'In Stock' assets available.")
 
     with col2:
@@ -252,8 +256,10 @@ def show_maintenance(df):
 def show_audit(df):
     st.header("Asset Audit")
     if not df.empty:
-        df['display'] = df['asset_tag'] + " | " + df['model']
-        selected_asset = st.selectbox("Select Asset to Audit", df['display'].tolist())
+        # Show assets with tags
+        valid = df[df['asset_tag'].notna()]
+        valid['display'] = valid['asset_tag'] + " | " + valid['model']
+        selected_asset = st.selectbox("Select Asset to Audit", valid['display'].tolist())
         if st.button("Mark Audited"):
             tag = selected_asset.split(" | ")[0]
             audit_asset(tag)
@@ -277,7 +283,6 @@ def show_search(df):
     if search_query:
         query = search_query.lower()
         search_cols = ['asset_tag', 'model', 'serial_number', 'assigned_to', 'glpi_id']
-        # Handle columns that might not exist in old schema
         cols_to_search = [c for c in search_cols if c in filtered_df.columns]
         
         filtered_df = filtered_df[
@@ -293,78 +298,97 @@ def show_manage(df):
         st.info("No assets to manage.")
         return
 
-    df['display'] = df['asset_tag'] + " | " + df['model'] + " | " + df['assigned_to'].fillna('')
+    # Display Logic: Handle None tags
+    df['display'] = df.apply(lambda x: f"{x['asset_tag'] if x['asset_tag'] else '[No Tag]'} | {x['model']} | {x['assigned_to'] if x['assigned_to'] else ''}", axis=1)
+    
     asset_list = df['display'].tolist()
     selected_asset_str = st.selectbox("Select Asset to Manage", asset_list, index=None, placeholder="Search for an asset...")
 
     if selected_asset_str:
-        asset_tag = selected_asset_str.split(" | ")[0]
-        asset_data = df[df['asset_tag'] == asset_tag].iloc[0].to_dict()
+        # Find record
+        tag_part = selected_asset_str.split(" | ")[0]
+        
+        if tag_part == "[No Tag]":
+            # Fallback find by display string match
+            asset_data = df[df['display'] == selected_asset_str].iloc[0].to_dict()
+        else:
+            asset_data = df[df['asset_tag'] == tag_part].iloc[0].to_dict()
+
+        original_tag = asset_data.get('asset_tag')
+        original_glpi_id = int(asset_data.get('glpi_id')) if pd.notnull(asset_data.get('glpi_id')) else None
 
         with st.form("manage_asset_form"):
             st.subheader("Edit Asset Details")
             
-            # --- 1. แยก Asset Tag และล็อคไม่ให้แก้ (Editable once rule) ---
-            st.text_input("Asset Tag (Fixed)", value=asset_data['asset_tag'], disabled=True, help="Cannot change Asset Tag after creation")
+            c_tag, c_glpi = st.columns(2)
+            with c_tag:
+                # เปิดให้แก้ไขได้ (Disabled = False)
+                new_asset_tag = st.text_input("Asset Tag", value=original_tag if original_tag else "", help="Assign or Change Asset Tag here")
             
-            # GLPI ID
-            glpi_id_val = int(asset_data.get('glpi_id')) if pd.notnull(asset_data.get('glpi_id')) else None
-            glpi_id = st.number_input("GLPI ID (Link)", value=glpi_id_val, placeholder="Auto-synced from GLPI")
+            with c_glpi:
+                glpi_id = st.number_input("GLPI ID", value=original_glpi_id, disabled=True)
 
             c1, c2 = st.columns(2)
             with c1:
                 model = st.text_input("Model", value=asset_data.get('model'))
                 
-                # --- 2. แก้ไข Error: Notebook is not in list ---
-                current_category = asset_data.get('category', 'Other')
-                cat_options = ["Laptop", "Desktop", "Monitor", "Printer", "Network Gear", "Other"]
-                # ถ้า Category ปัจจุบันไม่มีใน List ให้เติมเข้าไปชั่วคราว
-                if current_category not in cat_options:
-                    cat_options.insert(0, current_category)
+                # FIX: Add missing category to options to prevent error
+                current_cat = asset_data.get('category', 'Other')
+                cat_opts = ["Laptop", "Desktop", "Monitor", "Printer", "Network Gear", "Other"]
+                if current_cat not in cat_opts: 
+                    cat_opts.insert(0, current_cat)
                 
-                category = st.selectbox("Category", cat_options, index=cat_options.index(current_category))
+                category = st.selectbox("Category", cat_opts, index=cat_opts.index(current_cat))
                 
-                serial_number = st.text_input("Serial Number", value=asset_data.get('serial_number'))
+                serial = st.text_input("Serial Number", value=asset_data.get('serial_number'))
                 
-                # Handle Status ที่ไม่มีใน List ด้วยเช่นกัน
-                current_status = asset_data.get('status', 'In Stock')
-                status_options = ["In Stock", "In Use", "Repair", "Retired"]
-                if current_status not in status_options:
-                    status_options.insert(0, current_status)
+                # FIX: Add missing status to options
+                current_stat = asset_data.get('status', 'In Stock')
+                stat_opts = ["In Stock", "In Use", "Repair", "Retired"]
+                if current_stat not in stat_opts: 
+                    stat_opts.insert(0, current_stat)
                     
-                status = st.selectbox("Status", status_options, index=status_options.index(current_status))
+                status = st.selectbox("Status", stat_opts, index=stat_opts.index(current_stat))
 
             with c2:
-                try: p_date_val = datetime.strptime(str(asset_data.get('purchase_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('purchase_date') else None
-                except: p_date_val = None
-                purchase_date = st.date_input("Purchase Date", value=p_date_val)
-                price = st.number_input("Price", min_value=0.0, step=100.0, value=float(asset_data.get('price', 0.0)))
-                try: w_date_val = datetime.strptime(str(asset_data.get('warranty_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('warranty_date') else None
-                except: w_date_val = None
-                warranty_date = st.date_input("Warranty Expiry Date", value=w_date_val)
-                vendor = st.text_input("Vendor/Supplier", value=asset_data.get('vendor'))
+                try: p_d = datetime.strptime(str(asset_data.get('purchase_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('purchase_date') else None
+                except: p_d = None
+                p_date = st.date_input("Purchase Date", value=p_d)
+                
+                price = st.number_input("Price", value=float(asset_data.get('price', 0.0)))
+                
+                try: w_d = datetime.strptime(str(asset_data.get('warranty_date')).split(" ")[0], '%Y-%m-%d').date() if asset_data.get('warranty_date') else None
+                except: w_d = None
+                warranty = st.date_input("Warranty Expired", value=w_d)
+                
+                vendor = st.text_input("Vendor", value=asset_data.get('vendor'))
 
-            assigned_to = st.text_input("Assigned To", value=asset_data.get('assigned_to'))
-            department = st.text_input("Department / Location", value=asset_data.get('department'))
-            specs = st.text_area("Specifications", value=asset_data.get('specs'))
+            assigned = st.text_input("Assigned To", value=asset_data.get('assigned_to'))
+            dept = st.text_input("Department", value=asset_data.get('department'))
+            specs = st.text_area("Specs", value=asset_data.get('specs'))
             
-            update_button = st.form_submit_button("💾 Update Asset", type="primary")
-            delete_button = st.form_submit_button("🗑️ Delete Asset (to Bin)")
+            save_btn = st.form_submit_button("💾 Save Changes", type="primary")
+            del_btn = st.form_submit_button("🗑️ Delete Asset")
 
-            if update_button:
-                p_date_str = str(purchase_date) if purchase_date else None
-                w_date_str = str(warranty_date) if warranty_date else None
-                # ใช้ asset_tag เดิมในการ Update (เพราะเราล็อคไม่ให้แก้แล้ว)
-                success, message = update_asset(asset_tag, category, model, serial_number, status, assigned_to,
-                    p_date_str, price, w_date_str, vendor, department, specs, glpi_id=glpi_id)
+            if save_btn:
+                p_str = str(p_date) if p_date else None
+                w_str = str(warranty) if warranty else None
+                
+                success, message = update_asset(
+                    new_tag=new_asset_tag, cat=category, model=model, serial=serial, status=status, 
+                    assigned=assigned, p_date=p_str, price=price, warranty=w_str, vendor=vendor, 
+                    dept=dept, specs=specs, glpi_id=original_glpi_id, original_tag=original_tag
+                )
+                
                 if success:
-                    st.success("Asset updated successfully!")
+                    st.success("Updated successfully!")
+                    time.sleep(1)
                     st.rerun()
-                else: st.error(f"Failed to update asset: {message}")
+                else: st.error(f"Update failed: {message}")
 
-            if delete_button:
-                soft_delete(asset_tag)
-                st.warning(f"Asset {asset_tag} moved to Recycle Bin.")
+            if del_btn:
+                soft_delete(original_tag)
+                st.warning("Deleted.")
                 st.rerun()
 
 def show_add_asset():
@@ -385,40 +409,39 @@ def show_add_asset():
             vendor = st.text_input("Vendor/Supplier")
             assigned_to = st.text_input("Assigned To (if In Use)")
         
-        glpi_id = st.number_input("GLPI ID (Optional)", min_value=0, value=None, help="ใส่ ID ของ GLPI ถ้าทราบ เพื่อเชื่อมโยงข้อมูล")
-        
+        glpi_id = st.number_input("GLPI ID (Optional)", min_value=0, value=None)
         department = st.text_input("Department / Location")
         specs = st.text_area("Specifications")
         image_blob = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
         
         submitted = st.form_submit_button("Add Asset", type="primary")
         if submitted:
-            p_date_str = str(purchase_date) if purchase_date else None
-            w_date_str = str(warranty_date) if warranty_date else None
+            p_str = str(purchase_date) if purchase_date else None
+            w_str = str(warranty_date) if warranty_date else None
             success, message = add_asset(asset_tag, category, model, serial_number, status, assigned_to,
-                p_date_str, price, w_date_str, vendor, department, image_blob, specs, glpi_id=glpi_id)
+                p_str, price, w_str, vendor, department, image_blob, specs, glpi_id=glpi_id)
             if success:
-                st.success("Asset added successfully!")
+                st.success("Added successfully!")
                 st.rerun()
-            else: st.error(f"Failed to add asset: {message}")
+            else: st.error(f"Failed: {message}")
 
 def show_qr_code(df):
     st.header("QR Code Generator")
     if not df.empty:
-        df['display'] = df['asset_tag'] + " | " + df['model']
-        selected_assets = st.multiselect("Select Assets for QR Code", df['display'].tolist())
-        if st.button("Generate QR Codes"):
-            if selected_assets:
-                data_list = []
-                for item in selected_assets:
+        # Only valid tags
+        valid = df[df['asset_tag'].notna() & (df['asset_tag'] != "")]
+        valid['display'] = valid['asset_tag'] + " | " + valid['model']
+        selected = st.multiselect("Select Assets", valid['display'].tolist())
+        if st.button("Generate QR"):
+            if selected:
+                data = []
+                for item in selected:
                     tag = item.split(" | ")[0]
-                    row = df[df['asset_tag'] == tag].iloc[0]
-                    data_list.append({'tag': tag, 'model': row['model'], 'dept': row.get('department', 'Common')})
-                
-                pdf_bytes = create_bulk_qr_pdf(data_list)
-                st.download_button("Download QR Codes (PDF)", pdf_bytes, "qr_codes.pdf", "application/pdf")
-            else: st.warning("Please select at least one asset.")
-    else: st.info("No assets available.")
+                    row = valid[valid['asset_tag'] == tag].iloc[0]
+                    data.append({'tag': tag, 'model': row['model'], 'dept': row.get('department', 'Common')})
+                pdf = create_bulk_qr_pdf(data)
+                st.download_button("Download QR PDF", pdf, "qr.pdf", "application/pdf")
+    else: st.info("No assets.")
 
 def show_logs_reprint():
     st.header("Logs & Document Reprint")
@@ -431,15 +454,15 @@ def show_bin():
     bin_df = load_data("recycle_bin")
     if not bin_df.empty:
         st.dataframe(bin_df)
-        bin_df['display'] = bin_df['asset_tag'] + " | " + bin_df['model']
-        selected = st.selectbox("Select Asset to Restore", bin_df['display'].tolist())
-        if st.button("Restore Asset"):
+        bin_df['display'] = bin_df.apply(lambda x: f"{x['asset_tag'] if x['asset_tag'] else 'No Tag'} | {x['model']}", axis=1)
+        selected = st.selectbox("Restore", bin_df['display'].tolist())
+        if st.button("Restore"):
             tag = selected.split(" | ")[0]
-            res, msg = restore_asset(tag)
-            if res:
-                st.success("Asset Restored!")
-                st.rerun()
-            else: st.error(msg)
+            if tag == "No Tag": st.error("Cannot restore untagged asset here.")
+            else:
+                res, msg = restore_asset(tag)
+                if res: st.success("Restored!"); st.rerun()
+                else: st.error(msg)
     else: st.info("Recycle Bin is empty.")
 
 def show_admin_page():

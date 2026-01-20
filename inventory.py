@@ -151,7 +151,10 @@ def main_app():
                 # ตรวจสอบว่ามีคอลัมน์ GLPI ID หรือไม่ ถ้าไม่มีให้เป็น None
                 glpi_id = int(r['GLPI ID']) if 'GLPI ID' in r and pd.notnull(r['GLPI ID']) else None
                 
-                add_asset(str(r['Asset Tag']), str(r['Category']), str(r['Model']), str(r['Serial']), 
+                # Excel Import: ถ้า Asset Tag ว่าง ก็ให้เป็น None ได้
+                asset_tag = str(r['Asset Tag']) if pd.notnull(r['Asset Tag']) else None
+                
+                add_asset(asset_tag, str(r['Category']), str(r['Model']), str(r['Serial']), 
                           str(r['Status']), str(r['Assigned To']), str(r['Date']).split(" ")[0], 
                           float(r.get('Price', 0.0)), None, None, "Common", None, 
                           str(r.get('Specs', '')), glpi_id=glpi_id)
