@@ -57,7 +57,7 @@ def show_dashboard(df):
             if 'purchase_date' in df.columns and not df['purchase_date'].isna().all():
                 df_time = df.groupby(df['purchase_date'].dt.to_period("M").astype(str)).size().reset_index(name='count')
                 fig_line = px.bar(df_time, x='purchase_date', y='count', title="Asset Purchase Trend")
-                st.plotly_chart(fig_line, use_container_width=True) # Plotly ยังใช้ use_container_width ได้อยู่ หรือจะลองลบออกถ้ามี Warning
+                st.plotly_chart(fig_line, use_container_width=True)
         with cr: 
             st.plotly_chart(px.pie(df, names='status', title="Asset Status Distribution", hole=0.4), use_container_width=True)
         
@@ -73,9 +73,14 @@ def show_glpi_sync():
     if 'glpi_df' not in st.session_state: st.session_state.glpi_df = None
 
     st.markdown("### GLPI Sync Configuration")
-    # ใช้ st.secrets.get จะไม่ Error ถ้ามีไฟล์ secrets.toml อยู่แล้ว (แม้ไม่มี key glpi)
-    # แต่ถ้าไม่มีไฟล์ secrets.toml เลย จะ Error แบบที่คุณเจอ
-    glpi_creds = st.secrets.get("glpi", {})
+    
+    # --- แก้ไขจุดที่เกิด Error ---
+    # ใช้ try-except เพื่อดักจับกรณีไม่มีไฟล์ secrets.toml
+    try:
+        glpi_creds = st.secrets.get("glpi", {})
+    except Exception:
+        # ถ้าหาไฟล์ไม่เจอ ให้ใช้ค่าว่างแทน โปรแกรมจะไม่ Crash
+        glpi_creds = {}
 
     with st.form("glpi_form"):
         api_url = st.text_input("API URL", value=glpi_creds.get("api_url", ""))
@@ -107,7 +112,7 @@ def show_glpi_sync():
     if st.session_state.glpi_df is not None and not st.session_state.glpi_df.empty:
         st.markdown("---")
         st.subheader("Fetched GLPI Data Preview")
-        st.dataframe(st.session_state.glpi_df.head(), width="stretch") # แก้ตรงนี้
+        st.dataframe(st.session_state.glpi_df.head(), width="stretch")
         
         if st.button("Sync GLPI Data to Local DB", type="primary"):
             with st.spinner("Synchronizing data..."):
@@ -245,7 +250,7 @@ def show_maintenance(df):
     st.subheader("Maintenance Log")
     maintenance_df = load_data("maintenance_logs")
     if not maintenance_df.empty:
-        st.dataframe(maintenance_df, width="stretch", hide_index=True) # แก้ตรงนี้
+        st.dataframe(maintenance_df, width="stretch", hide_index=True)
     else: st.info("No maintenance records found.")
 
 def show_audit(df):
@@ -281,7 +286,7 @@ def show_search(df):
                 lambda x: x.str.lower().str.contains(query)
             ).any(axis=1)
         ]
-    st.dataframe(filtered_df, width="stretch", hide_index=True) # แก้ตรงนี้
+    st.dataframe(filtered_df, width="stretch", hide_index=True)
 
 def show_manage(df):
     st.header("🛠️ Manage Assets")
@@ -392,7 +397,7 @@ def show_logs_reprint():
     st.header("Logs & Document Reprint")
     st.subheader("Recent Borrowing Logs")
     logs = load_data("borrow_logs")
-    st.dataframe(logs, width="stretch", hide_index=True) # แก้ตรงนี้
+    st.dataframe(logs, width="stretch", hide_index=True)
 
 def show_bin():
     st.header("Recycle Bin")
@@ -446,7 +451,7 @@ def show_admin_page():
             st.subheader("Existing Users")
             users_df = get_all_users()
             if not users_df.empty:
-                st.dataframe(users_df, width="stretch", hide_index=True) # แก้ตรงนี้
+                st.dataframe(users_df, width="stretch", hide_index=True)
                 user_to_delete = st.selectbox("Select User to Delete", users_df['username'].tolist(), index=None, placeholder="Select user...")
                 if user_to_delete and st.button(f"Delete {user_to_delete}", type="primary"):
                     success, message = delete_user(user_to_delete)
